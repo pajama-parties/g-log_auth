@@ -1,0 +1,30 @@
+# 로컬 개발용 MySQL 8 — `npm run db:up` 으로 실행
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: glog-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      AUTH_DB_NAME: ${AUTH_DB_NAME}
+      SERVICE_DB_NAME: ${SERVICE_DB_NAME}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    ports:
+      - '${DB_PORT}:3306'
+    volumes:
+      - glog-mysql-data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  glog-mysql-data:
