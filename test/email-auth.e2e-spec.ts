@@ -132,7 +132,10 @@ describe('이메일 가입·로그인 (e2e)', () => {
     expect(paths).toEqual(
       expect.arrayContaining(['/api/auth/signup', '/api/auth/login', '/api/auth/kakao', '/api/auth/refresh', '/api/auth/logout', '/api/me']),
     );
-    expect(paths).not.toContain('/auth/kakao/callback');
+    // 카카오 리다이렉트 흐름은 /api 접두사 없이 문서화
+    expect(paths).toEqual(expect.arrayContaining(['/auth/kakao', '/auth/kakao/callback']));
+    expect(paths).not.toContain('/api/auth/kakao/callback');
+    expect(Object.keys(res.body.paths['/auth/kakao/callback'].get.responses)).toEqual(expect.arrayContaining(['303', '401']));
     const signupBody = res.body.paths['/api/auth/signup'].post.requestBody;
     expect(JSON.stringify(signupBody)).toMatch(/password/);
   });

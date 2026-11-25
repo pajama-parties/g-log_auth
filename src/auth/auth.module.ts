@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthenticationModule } from '@nestjs/authentication';
+import { MailModule } from '@nestjs/mail';
 import { AuthConfigModule } from '../config/auth-config.module.js';
 import { authConfig } from '../config/auth.config.js';
+import { mailOptions } from '../config/mail.config.js';
 import type { User } from '../database/schema/entities/auth/user.entity.js';
 import { MeModule } from '../me/me.module.js';
 import { AuthController } from './auth.controller.js';
@@ -36,6 +38,11 @@ declare module '@nestjs/authentication' {
           refreshToken: { ttl: jwt.refreshTtl, absoluteTtl: '90d' },
         };
       },
+    }),
+    // 이메일 로그인 인증 코드 발송 (SMTP_USER 없으면 서버 로그로)
+    MailModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => mailOptions((key) => config.get<string>(key)),
     }),
     MeModule,
   ],

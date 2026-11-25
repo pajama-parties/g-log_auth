@@ -1,5 +1,6 @@
 import { Controller, Get, HttpCode, Inject, NotFoundException, Post, Req, Res } from '@nestjs/common';
 import { Public } from '@nestjs/authentication';
+import { ConfigService } from '@nestjs/config';
 import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import type { AuthConfig } from '../config/auth.config.js';
@@ -10,7 +11,7 @@ import { issueKakaoState } from './kakao-state.js';
 const KAKAO_SDK_URL = 'https://t1.kakaocdn.net/kakao_js_sdk/2.7.2/kakao.min.js';
 
 /**
- * (임시·개발용) 로그인 상태 확인 + 카카오 로그인(JavaScript SDK) / 로그아웃 버튼 페이지.
+ * (임시·개발용) 로그인 상태 확인 + 카카오 로그인(JavaScript SDK) / 이메일 코드 로그인 / 로그아웃 페이지.
  * http://localhost:3000/auth/dev — 운영(NODE_ENV=production)에서는 404.
  *
  * SDK의 Kakao.Auth.authorize()가 인가 코드를 받아 기존 콜백(/auth/kakao/callback)으로 보내므로
@@ -20,7 +21,10 @@ const KAKAO_SDK_URL = 'https://t1.kakaocdn.net/kakao_js_sdk/2.7.2/kakao.min.js';
 @Public()
 @Controller('auth/dev')
 export class DevAuthController {
-  constructor(@Inject(AUTH_CONFIG) private readonly config: AuthConfig) {}
+  constructor(
+    @Inject(AUTH_CONFIG) private readonly config: AuthConfig,
+    private readonly env: ConfigService,
+  ) {}
 
   @Get()
   page(@Req() req: Request, @Res() res: Response) {
@@ -34,7 +38,15 @@ export class DevAuthController {
     }
     res
       .set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-      .send(renderPage({ javascriptKey: javascriptKey ?? null, redirectUri, forceLogin }));
+      .send(
+        renderPage({
+          javascriptKey: javascriptKey ?? null,
+          redirectUri,
+          forceLogin,
+          // SMTP 설정이 없으면 메일 대신 서버 로그에 코드가 찍힘 (mail.config.ts)
+          mailToLog: !this.env.get<string>('SMTP_USER'),
+        }),
+      );
   }
 
   /**
@@ -53,6 +65,7 @@ interface PageConfig {
   javascriptKey: string | null;
   redirectUri: string;
   forceLogin: boolean;
+  mailToLog: boolean;
 }
 
 function renderPage(config: PageConfig): string {
@@ -72,6 +85,10 @@ function renderPage(config: PageConfig): string {
   button:disabled { opacity: .5; cursor: not-allowed; }
   pre { background: #f5f5f5; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; }
   .warn { color: #b00020; }
+  .hint { color: #666; font-size: 14px; }
+  fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 16px 0; }
+  input { padding: 9px 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; width: 220px; margin: 4px 8px 4px 0; }
+  #email-code { width: 110px; letter-spacing: 4px; }
 </style>
 <script src="${KAKAO_SDK_URL}" crossorigin="anonymous"></script>
 </head>
@@ -82,6 +99,18 @@ function renderPage(config: PageConfig): string {
   <button id="kakao-login" class="kakao" disabled>카카오 로그인</button>
   <button id="logout">로그아웃</button>
 </p>
+<fieldset>
+  <legend>이메일 코드 로그인</legend>
+  <form id="email-form">
+    <input id="email" type="email" placeholder="이메일" autocomplete="email" required>
+    <button id="send-code" type="submit">코드 받기</button>
+  </form>
+  <form id="verify-form" hidden>
+    <input id="email-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6자리" autocomplete="one-time-code" required>
+    <button type="submit">로그인</button>
+  </form>
+  <p id="email-msg" class="hint"></p>
+</fieldset>
 <p id="warn" class="warn"></p>
 <pre id="me"></pre>
 <script>
@@ -135,6 +164,63 @@ function renderPage(config: PageConfig): string {
       meEl.textContent = '';
     }
   }
+
+  // 이메일 코드 로그인: ① 코드 받기 → ② 코드 입력 → 쿠키 발급
+  const emailInput = document.getElementById('email');
+  const codeInput = document.getElementById('email-code');
+  const verifyForm = document.getElementById('verify-form');
+  const emailMsg = document.getElementById('email-msg');
+  const sendBtn = document.getElementById('send-code');
+
+  async function errorText(res) {
+    try {
+      const body = await res.json();
+      return Array.isArray(body.message) ? body.message.join(' / ') : body.message || res.status;
+    } catch {
+      return res.status;
+    }
+  }
+
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  document.getElementById('email-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    sendBtn.disabled = true;
+    emailMsg.textContent = '보내는 중…';
+    const res = await post('/api/auth/email/code', { email: emailInput.value });
+    sendBtn.disabled = false;
+    if (!res.ok) {
+      emailMsg.textContent = '실패: ' + (await errorText(res));
+      return;
+    }
+    verifyForm.hidden = false;
+    codeInput.value = '';
+    codeInput.focus();
+    emailMsg.textContent = CONFIG.mailToLog
+      ? 'SMTP 설정이 없어 메일 대신 서버 로그(터미널)에 코드가 찍혔습니다. 10분 안에 입력하세요.'
+      : emailInput.value + ' 로 코드를 보냈습니다. 10분 안에 입력하세요.';
+    sendBtn.textContent = '코드 다시 받기';
+  });
+
+  verifyForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await post('/api/auth/email/verify', { email: emailInput.value, code: codeInput.value.trim() });
+    if (!res.ok) {
+      emailMsg.textContent = '실패: ' + (await errorText(res));
+      return;
+    }
+    verifyForm.hidden = true;
+    sendBtn.textContent = '코드 받기';
+    emailMsg.textContent = '로그인되었습니다.';
+    await load();
+  });
 
   document.getElementById('logout').addEventListener('click', async () => {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });

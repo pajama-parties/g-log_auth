@@ -40,3 +40,18 @@ export const kakaoLoginSchema = z.object({
   code: z.string().min(1).max(512).meta({ description: '카카오 인가 코드' }),
 });
 export type KakaoLoginInput = z.infer<typeof kakaoLoginSchema>;
+
+export const emailCodeRequestSchema = z
+  .object({ email })
+  .meta({ description: '이 이메일로 6자리 인증 코드를 보냄. 가입 안 된 이메일이면 계정을 만듦' });
+export type EmailCodeRequestInput = z.infer<typeof emailCodeRequestSchema>;
+
+export const emailCodeVerifySchema = z.object({
+  email,
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, { error: '인증 코드는 숫자 6자리입니다.' })
+    .meta({ description: '메일로 받은 6자리 숫자', example: '123456' }),
+});
+export type EmailCodeVerifyInput = z.infer<typeof emailCodeVerifySchema>;

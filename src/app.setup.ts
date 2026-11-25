@@ -25,10 +25,12 @@ export function configureApp(app: INestApplication) {
         '- 로그인하면 `access_token`(15분), `refresh_token`(14일) HttpOnly 쿠키가 설정됩니다. 프런트는 `credentials: "include"`만 쓰면 됩니다.',
         '- API가 401이면 `POST /api/auth/refresh` → 원래 요청 재시도 → 또 401이면 로그인 화면.',
         '- 조회 응답은 한 건이어도 배열입니다.',
+        '- 이메일 코드 로그인: `POST /api/auth/email/code`(코드 메일 발송) → `POST /api/auth/email/verify`(코드 입력 → 로그인, 처음이면 가입).',
+        '- 카카오 로그인: 서버가 처리하는 방식은 브라우저를 `/auth/kakao`로 이동(콜백 후 `/api/me`로 돌아옴), 프런트가 인가 코드를 받는 방식은 `POST /api/auth/kakao`.',
         '- 이 페이지에서 시험하려면 먼저 `POST /api/auth/login`(또는 signup)을 실행하세요. 같은 주소라 쿠키가 자동으로 붙습니다.',
       ].join('\n'),
     )
-    .setVersion('0.2.0')
+    .setVersion('0.3.0')
     .addCookieAuth(ACCESS_COOKIE)
     .build();
   SwaggerModule.setup('api/docs', app, () => SwaggerModule.createDocument(app, config));
