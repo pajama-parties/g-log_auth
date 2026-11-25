@@ -201,6 +201,16 @@ describe('인증 (e2e)', () => {
       await http().get('/auth/dev').set('Host', callbackHost()).expect(200);
     });
 
+    it('GET /auth/kakao 도 다른 호스트면 Redirect URI 호스트로 먼저 보내고, 맞는 호스트면 state 쿠키 + 카카오로', async () => {
+      const other = await http().get('/auth/kakao').set('Host', '127.0.0.1:3000').expect(302);
+      expect(other.headers.location).toBe(new URL('/auth/kakao', app.get<AuthConfig>(AUTH_CONFIG).kakao.redirectUri).toString());
+      expect(cookie(other, KAKAO_STATE_COOKIE)).toBeUndefined();
+
+      const same = await http().get('/auth/kakao').set('Host', callbackHost()).expect(302);
+      expect(same.headers.location).toMatch(/^https:\/\/kauth\.kakao\.com\//);
+      expect(cookie(same, KAKAO_STATE_COOKIE)).toBeDefined();
+    });
+
     it('버튼을 누를 때 받은 state로 콜백하면 로그인 후 /api/me 로, 쿠키 없거나 다르면 "만료" 401', async () => {
       const issued = await http().post('/api/auth/dev/state').expect(200);
       const state = issued.body.state as string;

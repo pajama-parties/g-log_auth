@@ -217,11 +217,17 @@ export class AuthController {
     description: [
       '`/api` 접두사 없음. 브라우저 주소창이나 `<a href="/auth/kakao">`로 이동하세요 (fetch·이 페이지의 Try it out으로는 카카오 화면이 열리지 않습니다).',
       'state 쿠키(10분, 1회용)를 심고 카카오 로그인 화면으로 보냅니다. 로그인하면 카카오가 `GET /auth/kakao/callback`으로 돌려보냅니다.',
-      '같은 호스트로 시작해야 합니다: `127.0.0.1`에서 시작하고 콜백이 `localhost`면 state 쿠키가 실리지 않아 401이 됩니다.',
+      'Redirect URI와 다른 호스트(예: `127.0.0.1`)로 열면 먼저 Redirect URI 호스트(예: `localhost`)의 `/auth/kakao`로 302 이동합니다 (state 쿠키가 콜백에 실리도록).',
     ].join('\n\n'),
   })
-  @ApiResponse({ status: 302, description: '카카오 로그인 화면(kauth.kakao.com)으로 이동' })
-  kakaoStart(@Res() res: Response) {
+  @ApiResponse({ status: 302, description: '카카오 로그인 화면(kauth.kakao.com)으로 이동, 또는 Redirect URI 호스트로 먼저 이동' })
+  kakaoStart(@Req() req: Request, @Res() res: Response) {
+    // state 쿠키는 호스트별: 127.0.0.1 에서 심으면 localhost 콜백에 실려 가지 않아 "만료" → Redirect URI 호스트로 먼저 이동
+    const callback = new URL(this.config.kakao.redirectUri);
+    if (req.headers.host !== callback.host) {
+      res.redirect(new URL('/auth/kakao', callback).toString());
+      return;
+    }
     const state = issueKakaoState(res, this.config.secureCookies);
     res.redirect(this.kakao.authorizeUrl(state));
   }

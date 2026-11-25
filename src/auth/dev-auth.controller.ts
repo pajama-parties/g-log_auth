@@ -216,10 +216,8 @@ function renderPage(config: PageConfig): string {
       emailMsg.textContent = '실패: ' + (await errorText(res));
       return;
     }
-    verifyForm.hidden = true;
-    sendBtn.textContent = '코드 받기';
-    emailMsg.textContent = '로그인되었습니다.';
-    await load();
+    // 카카오 로그인과 똑같이 로그인 후 내 정보 JSON(/api/me)으로 이동
+    location.href = '/api/me';
   });
 
   document.getElementById('logout').addEventListener('click', async () => {
