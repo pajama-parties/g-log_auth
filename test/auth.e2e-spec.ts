@@ -11,7 +11,9 @@ import type { App } from 'supertest/types.js';
 import type { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module.js';
 import { configureApp } from '../src/app.setup.js';
+import { AUTH_CONFIG, KAKAO_STATE_COOKIE } from '../src/auth/auth.constants.js';
 import { KakaoClient, type KakaoProfile } from '../src/auth/kakao.client.js';
+import type { AuthConfig } from '../src/config/auth.config.js';
 import { AUTH_CONNECTION } from '../src/config/database.config.js';
 import { OAuthAccount } from '../src/database/schema/entities/auth/oauth-account.entity.js';
 import { User } from '../src/database/schema/entities/auth/user.entity.js';
@@ -33,6 +35,7 @@ describe('인증 (e2e)', () => {
   let profile: KakaoProfile = { id: kakaoId, nickname: '테스트 집사', email: null, profileImageUrl: null };
 
   beforeAll(async () => {
+    process.env.SIGN_IN_RATE_LIMIT = '1000'; // 로그인을 여러 번 하므로 횟수 제한을 풂
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(KakaoClient)
       .useValue({
@@ -50,17 +53,29 @@ describe('인증 (e2e)', () => {
     serviceDb = app.get<DataSource>(getDataSourceToken());
   });
 
+  /** 테스트가 만든 계정 (탈퇴하면 카카오 연결이 지워지므로 id로 따로 기억) */
+  const createdUserIds = new Set<number>();
+
   afterAll(async () => {
     const link = await authDb.getRepository(OAuthAccount).findOne({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
-    if (link) {
-      await serviceDb.getRepository(UserProfile).delete({ userId: link.userId });
+    if (link) createdUserIds.add(link.userId);
+    for (const id of createdUserIds) {
+      await serviceDb.getRepository(UserProfile).delete({ userId: id });
       // users 삭제 → oauth_accounts, refresh 토큰, login_history(SET NULL)가 FK로 정리됨
-      await authDb.getRepository(User).delete({ id: link.userId });
+      await authDb.getRepository(User).delete({ id });
     }
     await app.close();
   });
 
   const http = () => request(app.getHttpServer());
+
+  /** 가짜 카카오로 로그인하고 access/refresh 쿠키와 user id를 돌려줌 */
+  async function login() {
+    const res = await http().post('/api/auth/kakao').send({ code: 'good-code' }).expect(200);
+    const link = await authDb.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+    createdUserIds.add(link.userId);
+    return { userId: link.userId, access: cookie(res, 'access_token')!, refresh: cookie(res, 'refresh_token')! };
+  }
 
   it('로그인 없이 /api/me 는 401', async () => {
     await http().get('/api/me').expect(401);
@@ -135,5 +150,77 @@ describe('인증 (e2e)', () => {
     } finally {
       await authDb.getRepository(User).update({ id: link.userId }, { status: 'ACTIVE' });
     }
+  });
+
+  describe('계정 (/api/me)', () => {
+    it('PATCH: 닉네임·카카오 동의 변경, 잘못된 값은 400', async () => {
+      const { access } = await login();
+      const auth = { Cookie: `access_token=${access}` };
+
+      const res = await http().patch('/api/me').set(auth).send({ name: '  새 닉네임 ', kakaoConsent: true }).expect(200);
+      expect(res.body).toEqual([expect.objectContaining({ name: '새 닉네임', kakaoConsent: true })]);
+
+      await http().patch('/api/me').set(auth).send({ name: '   ' }).expect(400);
+      await http().patch('/api/me').set(auth).send({ name: 'x'.repeat(31) }).expect(400);
+      await http().patch('/api/me').set(auth).send({ kakaoConsent: 'yes' }).expect(400);
+      await http().patch('/api/me').set(auth).send({ role: 'ADMIN' }).expect(400);
+      await http().patch('/api/me').send({ name: '로그인 안 함' }).expect(401);
+
+      const after = await http().get('/api/me').set(auth).expect(200);
+      expect(after.body[0]).toMatchObject({ name: '새 닉네임', kakaoConsent: true });
+    });
+
+    it('DELETE: 확인 문구 없으면 400, 탈퇴 후 토큰은 전부 무효, 다시 로그인하면 새 계정', async () => {
+      const { userId, access, refresh } = await login();
+
+      await http().delete('/api/me').set('Cookie', `access_token=${access}`).send({ confirm: '네' }).expect(400);
+      const res = await http().delete('/api/me').set('Cookie', `access_token=${access}`).send({ confirm: '삭제' }).expect(204);
+      expect((res.headers['set-cookie'] as unknown as string[]).join('\n')).toMatch(/access_token=;/);
+
+      // 15분짜리 access 토큰이 남아 있어도 바로 막힘, refresh도 폐기됨
+      await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(401);
+      await http().post('/api/auth/refresh').set('Cookie', `refresh_token=${refresh}`).expect(401);
+
+      const withdrawn = await authDb.getRepository(User).findOne({ where: { id: userId }, withDeleted: true });
+      expect(withdrawn).toMatchObject({ status: 'WITHDRAWN', email: null });
+      expect(withdrawn?.deletedAt).not.toBeNull();
+      const profileRow = await serviceDb.getRepository(UserProfile).findOneByOrFail({ userId });
+      expect(profileRow).toMatchObject({ nickname: '탈퇴한 사용자', kakaoConsent: false });
+
+      const again = await login();
+      expect(again.userId).not.toBe(userId);
+    });
+  });
+
+  describe('개발용 /auth/dev → 카카오 콜백 state 검사', () => {
+    const callbackHost = () => new URL(app.get<AuthConfig>(AUTH_CONFIG).kakao.redirectUri).host;
+
+    it('Redirect URI와 다른 호스트(127.0.0.1)로 열면 그 호스트로 보냄 (state 쿠키가 호스트별이라)', async () => {
+      const res = await http().get('/auth/dev').set('Host', 'some-other-host:3000').expect(302);
+      expect(res.headers.location).toBe(new URL('/auth/dev', app.get<AuthConfig>(AUTH_CONFIG).kakao.redirectUri).toString());
+      await http().get('/auth/dev').set('Host', callbackHost()).expect(200);
+    });
+
+    it('버튼을 누를 때 받은 state로 콜백하면 로그인 후 /api/me 로, 쿠키 없거나 다르면 "만료" 401', async () => {
+      const issued = await http().post('/api/auth/dev/state').expect(200);
+      const state = issued.body.state as string;
+      expect(cookie(issued, KAKAO_STATE_COOKIE)).toBe(state);
+      const stateCookie = `${KAKAO_STATE_COOKIE}=${state}`;
+
+      await http().get('/auth/kakao/callback').query({ code: 'good-code', state }).expect(401);
+      await http().get('/auth/kakao/callback').query({ code: 'good-code', state: 'other' }).set('Cookie', stateCookie).expect(401);
+      const ok = await http().get('/auth/kakao/callback').query({ code: 'good-code', state }).set('Cookie', stateCookie).expect(303);
+      expect(ok.headers.location).toBe('/api/me');
+      const access = cookie(ok, 'access_token')!;
+      expect(access).toBeTruthy();
+      expect(cookie(ok, KAKAO_STATE_COOKIE)).toBeUndefined(); // 한 번 쓰면 지워짐
+
+      // 성공 직후 같은 콜백이 또 열림(새로고침·중복 요청): state 쿠키는 없지만 로그인돼 있으니 "만료" 대신 /api/me
+      const again = await http().get('/auth/kakao/callback').query({ code: 'good-code', state }).set('Cookie', `access_token=${access}`).expect(303);
+      expect(again.headers.location).toBe('/api/me');
+      await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(200);
+      const link = await authDb.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+      createdUserIds.add(link.userId);
+    });
   });
 });

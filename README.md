@@ -28,7 +28,12 @@ npm run start:dev           # http://localhost:3000
 - 코드값(OK/DRY/WET 등)은 `src/database/schema/enums.ts`. 화면 문구로 바꾸는 표는 설계 엑셀 개요 9번.
 - 시간은 모두 UTC로 저장합니다.
 
-## 인증 (카카오 로그인 + JWT)
+## API 문서 (스웨거)
+
+서버를 켜고 **http://localhost:3000/api/docs** — 코드에서 자동 생성되므로 항상 실제 동작과 같습니다. (JSON: `/api/docs-json`)
+입력 검사는 Zod 스키마(`*.schemas.ts`)로 하고, 같은 스키마가 문서에 그대로 나옵니다.
+
+## 인증 (카카오·이메일 로그인 + JWT)
 
 모든 API는 기본으로 **로그인 필요**입니다(전역 가드). 열어 둘 곳만 `@Public()`. 컨트롤러에서 사용자는 `@CurrentUser() user: User`.
 
@@ -36,10 +41,14 @@ npm run start:dev           # http://localhost:3000
 |---|---|
 | `GET /auth/kakao` | (개발용) 브라우저로 열면 카카오 로그인 → 콜백 → 쿠키 발급 |
 | `GET /auth/kakao/callback` | 카카오 콘솔에 등록한 Redirect URI |
+| `POST /api/auth/signup` `{ email, password, name }` | 이메일 가입 → 바로 로그인 (201, 중복 409) |
+| `POST /api/auth/login` `{ email, password }` | 이메일 로그인 |
 | `POST /api/auth/kakao` `{ code }` | 프런트가 받은 인가 코드로 로그인 (스웨거) |
 | `POST /api/auth/refresh` | access 토큰 재발급. 401이면 다시 로그인 |
 | `POST /api/auth/logout` | 로그아웃 (204) |
 | `GET /api/me` | 내 정보 (로그인 필요) |
+| `PATCH /api/me` `{ name?, kakaoConsent? }` | 닉네임·카카오톡 동의 변경 |
+| `DELETE /api/me` `{ confirm: "삭제" }` | 탈퇴 |
 
 - 토큰은 **HttpOnly 쿠키**로 내려갑니다: `access_token`(15분, 모든 경로), `refresh_token`(14일, `/api/auth` 경로만).
   - 프런트는 `fetch(..., { credentials: 'include' })`만 쓰면 되고 토큰을 직접 다루지 않습니다.
@@ -48,6 +57,8 @@ npm run start:dev           # http://localhost:3000
 - refresh 토큰은 한 번 쓰면 새 것으로 바뀝니다. 이미 쓴 토큰이 다시 오면(탈취 의심) 그 로그인 전체가 끊깁니다.
 - refresh 토큰은 `auth_db.refresh_tokens`에 SHA-256 해시로만 저장합니다.
 - 카카오 콘솔에서 Client Secret을 켰다면 `.env`의 `KAKAO_CLIENT_SECRET`이 꼭 있어야 합니다(없으면 KOE010).
+- 비밀번호: 8~64자, 영문+숫자. scrypt 해시로만 저장. 틀린 비밀번호와 없는 이메일은 같은 401.
+- 로그인·가입·카카오 로그인은 같은 IP에서 1분에 `SIGN_IN_RATE_LIMIT`(기본 10)번까지 (넘으면 429). 나머지 API는 1분에 100번.
 - 테스트: `npm run test:e2e` (도커 MySQL 필요, 카카오는 가짜로 대체)
 
 ## 테이블을 바꿀 때 (마이그레이션)

@@ -38,12 +38,15 @@ export class KakaoClient {
   /** 카카오 로그인 화면 주소 (개발용 GET /auth/kakao 에서 사용) */
   authorizeUrl(state: string): string {
     const url = new URL('https://kauth.kakao.com/oauth/authorize');
-    url.search = new URLSearchParams({
+    const params = new URLSearchParams({
       response_type: 'code',
       client_id: this.config.kakao.clientId,
       redirect_uri: this.config.kakao.redirectUri,
       state,
-    }).toString();
+    });
+    // 개발용: 카카오 로그인 세션이 남아 있어도 로그인 화면을 다시 띄워 인증 과정을 반복 테스트
+    if (this.config.kakao.forceLogin) params.set('prompt', 'login');
+    url.search = params.toString();
     return url.toString();
   }
 

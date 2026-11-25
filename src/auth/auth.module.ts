@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthenticationModule } from '@nestjs/authentication';
-import { authConfig, type AuthConfig } from '../config/auth.config.js';
+import { AuthConfigModule } from '../config/auth-config.module.js';
+import { authConfig } from '../config/auth.config.js';
 import type { User } from '../database/schema/entities/auth/user.entity.js';
 import { MeModule } from '../me/me.module.js';
-import { AUTH_CONFIG } from './auth.constants.js';
 import { AuthController } from './auth.controller.js';
+import { DevAuthController } from './dev-auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { JwtCookieAuth, JwtHeaderAuth } from './jwt-auth.providers.js';
 import { KakaoClient } from './kakao.client.js';
@@ -24,6 +25,7 @@ declare module '@nestjs/authentication' {
  */
 @Module({
   imports: [
+    AuthConfigModule,
     AuthenticationModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
@@ -37,13 +39,8 @@ declare module '@nestjs/authentication' {
     }),
     MeModule,
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, DevAuthController],
   providers: [
-    {
-      provide: AUTH_CONFIG,
-      inject: [ConfigService],
-      useFactory: (config: ConfigService): AuthConfig => authConfig((key) => config.get<string>(key)),
-    },
     AuthService,
     KakaoClient,
     TypeOrmRefreshTokenStore,

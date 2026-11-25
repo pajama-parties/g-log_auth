@@ -7,6 +7,10 @@ export interface AuthConfig {
     /** 카카오 콘솔에서 Client Secret을 "사용함"으로 했을 때만 */
     clientSecret?: string;
     redirectUri: string;
+    /** 카카오 JavaScript SDK 키 (브라우저 로그인 버튼용). 없으면 SDK 로그인 버튼 비활성 */
+    javascriptKey?: string;
+    /** 개발 환경에서만 true: 인가 요청에 prompt=login을 붙여 카카오 세션이 있어도 매번 로그인 화면을 띄움 */
+    forceLogin: boolean;
   };
   jwt: {
     /** HS256 키. 32바이트 이상 (짧으면 앱이 시작되지 않음) */
@@ -36,17 +40,20 @@ function required(get: EnvGetter, key: string): string {
 }
 
 export function authConfig(get: EnvGetter): AuthConfig {
+  const production = get('NODE_ENV') === 'production';
   return {
     kakao: {
       clientId: required(get, 'KAKAO_CLIENT_ID'),
       clientSecret: get('KAKAO_CLIENT_SECRET') || undefined,
       redirectUri: required(get, 'KAKAO_REDIRECT_URI'),
+      javascriptKey: get('KAKAO_JAVASCRIPT_KEY') || undefined,
+      forceLogin: !production,
     },
     jwt: {
       accessSecret: required(get, 'JWT_ACCESS_SECRET'),
       accessTtl: duration(get, 'JWT_ACCESS_EXPIRES_IN', '15m'),
       refreshTtl: duration(get, 'JWT_REFRESH_EXPIRES_IN', '14d'),
     },
-    secureCookies: get('NODE_ENV') === 'production',
+    secureCookies: production,
   };
 }
