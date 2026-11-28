@@ -12,8 +12,7 @@ import {
 import { PasswordHasher } from '@nestjs/authentication';
 import { Mailer } from '@nestjs/mail';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, IsNull, MoreThanOrEqual, QueryFailedError } from 'typeorm';
-import { AUTH_CONNECTION } from '../config/database.config.js';
+import { DataSource, type EntityManager, IsNull, MoreThanOrEqual, QueryFailedError } from 'typeorm';
 import { AuthToken } from '../database/schema/entities/auth/auth-token.entity.js';
 import { LoginHistory } from '../database/schema/entities/auth/login-history.entity.js';
 import { OAuthAccount } from '../database/schema/entities/auth/oauth-account.entity.js';
@@ -44,8 +43,20 @@ function sameHash(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/** PostgreSQL unique_violation */
 function isDuplicateKey(err: unknown): boolean {
-  return err instanceof QueryFailedError && (err.driverError as { code?: string } | undefined)?.code === 'ER_DUP_ENTRY';
+  return err instanceof QueryFailedError && (err.driverError as { code?: string } | undefined)?.code === '23505';
+}
+
+function nicknameOf(nickname: string | null | undefined): string {
+  return (nickname?.trim() || DEFAULT_NICKNAME).slice(0, NICKNAME_MAX);
+}
+
+/** 계정과 같은 트랜잭션에서 프로필을 만듦 (service.user_profiles.user_id → auth.users FK) */
+async function createUserWithProfile(em: EntityManager, fields: Partial<User>, nickname: string | null): Promise<User> {
+  const user = await em.save(em.create(User, { role: 'USER', status: 'ACTIVE', ...fields }));
+  await em.insert(UserProfile, { userId: user.id, nickname: nicknameOf(nickname) });
+  return user;
 }
 
 @Injectable()
@@ -53,8 +64,7 @@ export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
-    @InjectDataSource(AUTH_CONNECTION) private readonly authDb: DataSource,
-    @InjectDataSource() private readonly serviceDb: DataSource,
+    @InjectDataSource() private readonly db: DataSource,
     private readonly kakao: KakaoClient,
     private readonly passwordHasher: PasswordHasher,
     private readonly mailer: Mailer,
@@ -63,7 +73,7 @@ export class AuthService {
   /** 로그인 유지 중인 사용자. 정지·탈퇴했으면 null (→ 401) */
   findActiveUser(id: number): Promise<User | null> {
     if (!Number.isSafeInteger(id)) return Promise.resolve(null);
-    return this.authDb.getRepository(User).findOne({ where: { id, status: 'ACTIVE' } });
+    return this.db.getRepository(User).findOne({ where: { id, status: 'ACTIVE' } });
   }
 
   /** 카카오 인가 코드로 로그인. 처음이면 회원가입까지 */
@@ -82,8 +92,7 @@ export class AuthService {
       throw new ForbiddenException('이용이 정지된 계정입니다.');
     }
 
-    await this.ensureProfile(user.id, profile.nickname);
-    await this.authDb.getRepository(User).update({ id: user.id }, { lastLoginAt: new Date() });
+    await this.db.getRepository(User).update({ id: user.id }, { lastLoginAt: new Date() });
     await this.recordLogin('KAKAO', user.id, true, ip);
     return user;
   }
@@ -94,24 +103,20 @@ export class AuthService {
     let user: User;
     try {
       // 먼저 조회하고 넣으면 동시 가입 때 둘 다 통과하므로, 넣어 보고 UNIQUE 위반을 409로 바꿈
-      user = await this.authDb.getRepository(User).save(
-        this.authDb.getRepository(User).create({
-          email: input.email,
-          passwordHash,
-          passwordChangedAt: new Date(),
-          role: 'USER',
-          status: 'ACTIVE',
-          lastLoginAt: new Date(),
-        }),
+      user = await this.db.transaction((em) =>
+        createUserWithProfile(
+          em,
+          { email: input.email, passwordHash, passwordChangedAt: new Date(), lastLoginAt: new Date() },
+          input.name,
+        ),
       );
     } catch (err) {
       if (!isDuplicateKey(err)) throw err;
       // 코드만 요청하고 인증하지 않은 계정(비밀번호 없음·미인증)은 이 가입으로 가져감 → 코드 요청만으로 남의 이메일을 선점하지 못함
-      const claimed = await this.claimUnverifiedEmail(input.email, passwordHash);
+      const claimed = await this.claimUnverifiedEmail(input.email, passwordHash, input.name);
       if (!claimed) throw new ConflictException('이미 가입된 이메일입니다.');
       user = claimed;
     }
-    await this.ensureProfile(user.id, input.name);
     await this.recordLogin('EMAIL', user.id, true, ip);
     // 해시가 응답·로그로 새지 않게 떼고 돌려줌
     const { passwordHash: _hash, ...rest } = user;
@@ -123,7 +128,7 @@ export class AuthService {
    * 없는 이메일이어도 verify()가 가짜 해시를 검사하므로 응답 시간으로 가입 여부를 알 수 없음.
    */
   async loginWithEmail(input: LoginInput, ip: string | undefined): Promise<User> {
-    const found = await this.authDb
+    const found = await this.db
       .getRepository(User)
       .createQueryBuilder('u')
       .addSelect('u.passwordHash')
@@ -145,8 +150,7 @@ export class AuthService {
     if (found.passwordHash && this.passwordHasher.needsRehash(found.passwordHash)) {
       changes.passwordHash = await this.passwordHasher.hash(input.password);
     }
-    await this.authDb.getRepository(User).update({ id: found.id }, changes);
-    await this.ensureProfile(found.id, null);
+    await this.db.getRepository(User).update({ id: found.id }, changes);
     await this.recordLogin('EMAIL', found.id, true, ip);
     const { passwordHash: _hash, ...user } = found;
     return user as User;
@@ -158,7 +162,7 @@ export class AuthService {
    */
   async requestEmailCode(email: string): Promise<void> {
     const user = await this.findOrCreateEmailUser(email);
-    const tokens = this.authDb.getRepository(AuthToken);
+    const tokens = this.db.getRepository(AuthToken);
 
     const last = await tokens.findOne({ where: { userId: user.id, purpose: 'EMAIL_VERIFY' }, order: { createdAt: 'DESC' } });
     if (last && !last.usedAt && Date.now() - last.createdAt.getTime() < EMAIL_CODE_RESEND_SECONDS * 1000) {
@@ -167,7 +171,7 @@ export class AuthService {
 
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
     try {
-      await this.authDb.transaction(async (em) => {
+      await this.db.transaction(async (em) => {
         await em.delete(AuthToken, { userId: user.id, purpose: 'EMAIL_VERIFY' });
         await em.insert(AuthToken, {
           userId: user.id,
@@ -194,8 +198,8 @@ export class AuthService {
 
   /** 이메일 로그인 2단계: 코드가 맞으면 email_verified=1 로 바꾸고 로그인 */
   async verifyEmailCode(input: EmailCodeVerifyInput, ip: string | undefined): Promise<User> {
-    const user = await this.authDb.getRepository(User).findOne({ where: { email: input.email } });
-    const tokens = this.authDb.getRepository(AuthToken);
+    const user = await this.db.getRepository(User).findOne({ where: { email: input.email } });
+    const tokens = this.db.getRepository(AuthToken);
     const token = user
       ? await tokens.findOne({ where: { userId: user.id, purpose: 'EMAIL_VERIFY', usedAt: IsNull() } })
       : null;
@@ -207,7 +211,7 @@ export class AuthService {
     if (!sameHash(token.tokenHash, hashEmailCode(user.id, input.code))) {
       await this.recordLogin('EMAIL', user.id, false, ip);
       // 무작위 대입 방지: 이 코드를 받은 뒤 실패가 5번이면 코드 폐기
-      const failures = await this.authDb.getRepository(LoginHistory).count({
+      const failures = await this.db.getRepository(LoginHistory).count({
         where: { userId: user.id, method: 'EMAIL', success: false, createdAt: MoreThanOrEqual(token.createdAt) },
       });
       if (failures >= EMAIL_CODE_MAX_ATTEMPTS) {
@@ -229,19 +233,18 @@ export class AuthService {
       throw new ForbiddenException('이용이 정지된 계정입니다.');
     }
 
-    await this.authDb.getRepository(User).update({ id: user.id }, { emailVerified: true, lastLoginAt: new Date() });
-    await this.ensureProfile(user.id, null);
+    await this.db.getRepository(User).update({ id: user.id }, { emailVerified: true, lastLoginAt: new Date() });
     await this.recordLogin('EMAIL', user.id, true, ip);
     user.emailVerified = true;
     return user;
   }
 
   private async findOrCreateEmailUser(email: string): Promise<User> {
-    const users = this.authDb.getRepository(User);
+    const users = this.db.getRepository(User);
     const existing = await users.findOne({ where: { email } });
     if (existing) return existing;
     try {
-      return await users.save(users.create({ email, emailVerified: false, role: 'USER', status: 'ACTIVE' }));
+      return await this.db.transaction((em) => createUserWithProfile(em, { email, emailVerified: false }, null));
     } catch (err) {
       // 동시에 두 번 요청 → 먼저 만든 계정 사용
       if (isDuplicateKey(err)) {
@@ -252,19 +255,25 @@ export class AuthService {
     }
   }
 
-  /** 미인증·비밀번호 없는 계정에 비밀번호를 붙여 가입 처리. 조건은 UPDATE 한 번으로 확인 (동시 요청 대비) */
-  private async claimUnverifiedEmail(email: string, passwordHash: string): Promise<User | null> {
-    const result = await this.authDb
-      .createQueryBuilder()
-      .update(User)
-      .set({ passwordHash, passwordChangedAt: new Date(), lastLoginAt: new Date() })
-      .where('email = :email AND email_verified = 0 AND password_hash IS NULL AND deleted_at IS NULL', { email })
-      .execute();
-    if (result.affected !== 1) return null;
-    const user = await this.authDb.getRepository(User).findOneOrFail({ where: { email } });
-    // 코드 로그인용으로 보냈던 코드는 무효화
-    await this.authDb.getRepository(AuthToken).delete({ userId: user.id, purpose: 'EMAIL_VERIFY' });
-    return user;
+  /**
+   * 미인증·비밀번호 없는 계정에 비밀번호를 붙여 가입 처리. 조건은 UPDATE 한 번으로 확인 (동시 요청 대비).
+   * 코드 요청 때 기본 닉네임으로 만든 프로필은 가입할 때 입력한 닉네임으로 바꿈
+   */
+  private async claimUnverifiedEmail(email: string, passwordHash: string, nickname: string): Promise<User | null> {
+    return this.db.transaction(async (em) => {
+      const result = await em
+        .createQueryBuilder()
+        .update(User)
+        .set({ passwordHash, passwordChangedAt: new Date(), lastLoginAt: new Date() })
+        .where('email = :email AND email_verified = false AND password_hash IS NULL AND deleted_at IS NULL', { email })
+        .execute();
+      if (result.affected !== 1) return null;
+      const user = await em.findOneOrFail(User, { where: { email } });
+      await em.update(UserProfile, { userId: user.id }, { nickname: nicknameOf(nickname) });
+      // 코드 로그인용으로 보냈던 코드는 무효화
+      await em.delete(AuthToken, { userId: user.id, purpose: 'EMAIL_VERIFY' });
+      return user;
+    });
   }
 
   private async findOrCreateKakaoUser(profile: KakaoProfile): Promise<User> {
@@ -272,8 +281,8 @@ export class AuthService {
     if (existing) return existing;
 
     try {
-      return await this.authDb.transaction(async (em) => {
-        const user = await em.save(em.create(User, { email: null, role: 'USER', status: 'ACTIVE' }));
+      return await this.db.transaction(async (em) => {
+        const user = await createUserWithProfile(em, { email: null }, profile.nickname);
         await em.insert(OAuthAccount, {
           userId: user.id,
           provider: 'KAKAO',
@@ -294,34 +303,20 @@ export class AuthService {
 
   /** (KAKAO, 회원번호)로 계정 찾기. 연결은 있는데 회원이 탈퇴(소프트 삭제)했다면 연결을 지우고 새로 가입시킴 */
   private async findByKakaoId(kakaoId: string): Promise<User | null> {
-    const link = await this.authDb
+    const link = await this.db
       .getRepository(OAuthAccount)
       .findOne({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
     if (!link) return null;
-    const user = await this.authDb.getRepository(User).findOne({ where: { id: link.userId } });
+    const user = await this.db.getRepository(User).findOne({ where: { id: link.userId } });
     if (user) return user;
-    await this.authDb.getRepository(OAuthAccount).delete({ id: link.id });
+    await this.db.getRepository(OAuthAccount).delete({ id: link.id });
     return null;
   }
 
-  /**
-   * service_db.user_profiles 행 보장. auth_db와 다른 DB라 트랜잭션을 함께 못 묶으므로
-   * 로그인할 때마다 "없으면 만들기"로 맞춤 (가입 도중 끊겨도 다음 로그인에 복구됨)
-   */
-  private async ensureProfile(userId: number, nickname: string | null) {
-    const name = (nickname?.trim() || DEFAULT_NICKNAME).slice(0, NICKNAME_MAX);
-    await this.serviceDb
-      .createQueryBuilder()
-      .insert()
-      .into(UserProfile)
-      .values({ userId, nickname: name })
-      .orIgnore()
-      .execute();
-  }
 
   private async recordLogin(method: LoginMethod, userId: number | null, success: boolean, ip: string | undefined) {
     try {
-      await this.authDb.getRepository(LoginHistory).insert({ userId, method, success, ipAddress: ip?.slice(0, 45) ?? null });
+      await this.db.getRepository(LoginHistory).insert({ userId, method, success, ipAddress: ip?.slice(0, 45) ?? null });
     } catch (err) {
       // 기록 실패로 로그인이 막히면 안 됨
       this.logger.error('login_history 저장 실패', err instanceof Error ? err.stack : String(err));

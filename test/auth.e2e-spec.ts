@@ -1,5 +1,5 @@
 /**
- * 인증 e2e: 도커 MySQL(npm run db:up + migration:run)이 켜져 있어야 함.
+ * 인증 e2e: 도커 PostgreSQL(npm run db:up + migration:run)이 켜져 있어야 함.
  * 카카오 서버 대신 KakaoClient를 가짜로 바꿔서, 가입·로그인·쿠키·refresh 회전·재사용 감지·로그아웃을 확인.
  */
 import { randomUUID } from 'node:crypto';
@@ -14,7 +14,6 @@ import { configureApp } from '../src/app.setup.js';
 import { AUTH_CONFIG, KAKAO_STATE_COOKIE } from '../src/auth/auth.constants.js';
 import { KakaoClient, type KakaoProfile } from '../src/auth/kakao.client.js';
 import type { AuthConfig } from '../src/config/auth.config.js';
-import { AUTH_CONNECTION } from '../src/config/database.config.js';
 import { OAuthAccount } from '../src/database/schema/entities/auth/oauth-account.entity.js';
 import { User } from '../src/database/schema/entities/auth/user.entity.js';
 import { UserProfile } from '../src/database/schema/entities/service/user-profile.entity.js';
@@ -29,8 +28,7 @@ function cookie(res: request.Response, name: string): string | undefined {
 
 describe('인증 (e2e)', () => {
   let app: INestApplication<App>;
-  let authDb: DataSource;
-  let serviceDb: DataSource;
+  let db: DataSource;
   const kakaoId = `test-${randomUUID()}`;
   let profile: KakaoProfile = { id: kakaoId, nickname: '테스트 집사', email: null, profileImageUrl: null };
 
@@ -49,20 +47,19 @@ describe('인증 (e2e)', () => {
     app = moduleRef.createNestApplication();
     configureApp(app);
     await app.init();
-    authDb = app.get<DataSource>(getDataSourceToken(AUTH_CONNECTION));
-    serviceDb = app.get<DataSource>(getDataSourceToken());
+    db = app.get<DataSource>(getDataSourceToken());
   });
 
   /** 테스트가 만든 계정 (탈퇴하면 카카오 연결이 지워지므로 id로 따로 기억) */
   const createdUserIds = new Set<number>();
 
   afterAll(async () => {
-    const link = await authDb.getRepository(OAuthAccount).findOne({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+    const link = await db.getRepository(OAuthAccount).findOne({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
     if (link) createdUserIds.add(link.userId);
     for (const id of createdUserIds) {
-      await serviceDb.getRepository(UserProfile).delete({ userId: id });
+      await db.getRepository(UserProfile).delete({ userId: id });
       // users 삭제 → oauth_accounts, refresh 토큰, login_history(SET NULL)가 FK로 정리됨
-      await authDb.getRepository(User).delete({ id });
+      await db.getRepository(User).delete({ id });
     }
     await app.close();
   });
@@ -72,7 +69,7 @@ describe('인증 (e2e)', () => {
   /** 가짜 카카오로 로그인하고 access/refresh 쿠키와 user id를 돌려줌 */
   async function login() {
     const res = await http().post('/api/auth/kakao').send({ code: 'good-code' }).expect(200);
-    const link = await authDb.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+    const link = await db.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
     createdUserIds.add(link.userId);
     return { userId: link.userId, access: cookie(res, 'access_token')!, refresh: cookie(res, 'refresh_token')! };
   }
@@ -97,7 +94,7 @@ describe('인증 (e2e)', () => {
 
     profile = { ...profile, nickname: '바뀐 닉네임' }; // 카카오 닉네임이 바뀌어도 우리 닉네임은 유지
     await http().post('/api/auth/kakao').send({ code: 'good-code' }).expect(200);
-    const links = await authDb.getRepository(OAuthAccount).count({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+    const links = await db.getRepository(OAuthAccount).count({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
     expect(links).toBe(1);
     const me = await http().get('/api/me').set('Cookie', `access_token=${cookie(first, 'access_token')}`).expect(200);
     expect(me.body[0].name).toBe('테스트 집사');
@@ -141,14 +138,14 @@ describe('인증 (e2e)', () => {
   it('정지된 계정은 갖고 있던 access 토큰으로도 401, 다시 로그인하면 403', async () => {
     const login = await http().post('/api/auth/kakao').send({ code: 'good-code' }).expect(200);
     const access = cookie(login, 'access_token')!;
-    const link = await authDb.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+    const link = await db.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
 
-    await authDb.getRepository(User).update({ id: link.userId }, { status: 'SUSPENDED' });
+    await db.getRepository(User).update({ id: link.userId }, { status: 'SUSPENDED' });
     try {
       await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(401);
       await http().post('/api/auth/kakao').send({ code: 'good-code' }).expect(403);
     } finally {
-      await authDb.getRepository(User).update({ id: link.userId }, { status: 'ACTIVE' });
+      await db.getRepository(User).update({ id: link.userId }, { status: 'ACTIVE' });
     }
   });
 
@@ -181,10 +178,10 @@ describe('인증 (e2e)', () => {
       await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(401);
       await http().post('/api/auth/refresh').set('Cookie', `refresh_token=${refresh}`).expect(401);
 
-      const withdrawn = await authDb.getRepository(User).findOne({ where: { id: userId }, withDeleted: true });
+      const withdrawn = await db.getRepository(User).findOne({ where: { id: userId }, withDeleted: true });
       expect(withdrawn).toMatchObject({ status: 'WITHDRAWN', email: null });
       expect(withdrawn?.deletedAt).not.toBeNull();
-      const profileRow = await serviceDb.getRepository(UserProfile).findOneByOrFail({ userId });
+      const profileRow = await db.getRepository(UserProfile).findOneByOrFail({ userId });
       expect(profileRow).toMatchObject({ nickname: '탈퇴한 사용자', kakaoConsent: false });
 
       const again = await login();
@@ -229,7 +226,7 @@ describe('인증 (e2e)', () => {
       const again = await http().get('/auth/kakao/callback').query({ code: 'good-code', state }).set('Cookie', `access_token=${access}`).expect(303);
       expect(again.headers.location).toBe('/api/me');
       await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(200);
-      const link = await authDb.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
+      const link = await db.getRepository(OAuthAccount).findOneOrFail({ where: { provider: 'KAKAO', providerUserId: kakaoId } });
       createdUserIds.add(link.userId);
     });
   });

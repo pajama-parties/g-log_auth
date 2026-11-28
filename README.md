@@ -1,6 +1,6 @@
 # g-log backend
 
-NestJS 12 + TypeORM 1 + MySQL 8. API 명세: https://pajama-parties.github.io/g-log_swagger/
+NestJS 12 + TypeORM 1 + PostgreSQL 17. API 명세: https://pajama-parties.github.io/g-log_swagger/
 DB 설계: 레포 루트의 `DB설계_ERD_v2.xlsx`
 
 ## 처음 한 번
@@ -9,22 +9,25 @@ DB 설계: 레포 루트의 `DB설계_ERD_v2.xlsx`
 cd backend
 npm install
 cp .env.example .env        # 비밀번호 등 값 채우기
-npm run db:up               # 도커 MySQL 실행 (Docker Desktop 켜져 있어야 함)
-npm run migration:run       # auth_db, service_db 테이블 생성
+npm run db:up               # 도커 PostgreSQL 실행 (Docker Desktop 켜져 있어야 함)
+npm run migration:run       # auth·service 스키마와 테이블 생성
 npm run start:dev           # http://localhost:3000
 ```
 
-- 도커 MySQL은 **3307** 포트를 씁니다 (PC에 설치된 MySQL이 3306을 쓰는 경우와 겹치지 않게).
-- 접속 정보: `127.0.0.1:3307`, 계정 `.env`의 `DB_USER` / `DB_PASSWORD` (Workbench·DBeaver 등으로 확인 가능)
+- 도커 PostgreSQL은 **5433** 포트를 씁니다 (PC에 설치된 PostgreSQL이 5432를 쓰는 경우와 겹치지 않게).
+- 접속 정보: `127.0.0.1:5433`, DB `.env`의 `DB_NAME`, 계정 `DB_USER` / `DB_PASSWORD` (DBeaver·pgAdmin 등으로 확인 가능)
 
 ## DB 구조
 
-| 연결 | DB | 엔티티 위치 | 리포지토리 주입 |
-|---|---|---|---|
-| `auth` | `auth_db` (7개 테이블) | `src/database/schema/entities/auth` | `@InjectRepository(User, AUTH_CONNECTION)` |
-| `default` | `service_db` (12개 테이블) | `src/database/schema/entities/service` | `@InjectRepository(Plant)` |
+PostgreSQL DB 하나(`DB_NAME`)를 스키마 두 개로 나눠 쓰고, 연결은 하나입니다. 서비스에서는 `@InjectDataSource() db: DataSource`로 받아 두 스키마의 엔티티를 함께 다룹니다.
 
-- 두 DB 사이(user_id, device_id)는 실제 FK가 없는 **논리 FK**입니다. 앱에서 존재 여부를 확인하세요.
+| 스키마 | 테이블 | 엔티티 위치 |
+|---|---|---|
+| `auth` | 계정·토큰 (7개) | `src/database/schema/entities/auth` |
+| `service` | 화분·센서·알림·조언·커뮤니티 (12개) | `src/database/schema/entities/service` |
+
+- 두 스키마 사이에도 실제 FK가 있습니다: `service.user_profiles.user_id` → `auth.users`, `auth.device_credentials.device_id` → `service.devices`.
+- 연결이 하나라서 두 스키마를 바꾸는 작업은 트랜잭션 하나로 묶습니다. 가입할 때 계정과 프로필을 함께 만들고, 탈퇴할 때 계정과 서비스 데이터를 함께 정리합니다.
 - 코드값(OK/DRY/WET 등)은 `src/database/schema/enums.ts`. 화면 문구로 바꾸는 표는 설계 엑셀 개요 9번.
 - 시간은 모두 UTC로 저장합니다.
 
@@ -55,19 +58,18 @@ npm run start:dev           # http://localhost:3000
   - API가 401이면 `POST /api/auth/refresh` 한 번 → 원래 요청 재시도 → 또 401이면 로그인 화면.
 - Postman 등에서는 `Authorization: Bearer <access_token>` 헤더도 됩니다.
 - refresh 토큰은 한 번 쓰면 새 것으로 바뀝니다. 이미 쓴 토큰이 다시 오면(탈취 의심) 그 로그인 전체가 끊깁니다.
-- refresh 토큰은 `auth_db.refresh_tokens`에 SHA-256 해시로만 저장합니다.
+- refresh 토큰은 `auth.refresh_tokens`에 SHA-256 해시로만 저장합니다.
 - 카카오 콘솔에서 Client Secret을 켰다면 `.env`의 `KAKAO_CLIENT_SECRET`이 꼭 있어야 합니다(없으면 KOE010).
 - 비밀번호: 8~64자, 영문+숫자. scrypt 해시로만 저장. 틀린 비밀번호와 없는 이메일은 같은 401.
 - 로그인·가입·카카오 로그인은 같은 IP에서 1분에 `SIGN_IN_RATE_LIMIT`(기본 10)번까지 (넘으면 429). 나머지 API는 1분에 100번.
-- 테스트: `npm run test:e2e` (도커 MySQL 필요, 카카오는 가짜로 대체)
+- 테스트: `npm run test:e2e` (도커 PostgreSQL과 `migration:run` 필요, 카카오는 가짜로 대체)
 
 ## 테이블을 바꿀 때 (마이그레이션)
 
 `synchronize`는 꺼져 있습니다. 엔티티를 고친 뒤:
 
 ```bash
-npm run migration:generate:service -- src/database/schema/migrations/service/AddSomething
-npm run migration:generate:auth    -- src/database/schema/migrations/auth/AddSomething
+npm run migration:generate -- src/database/schema/migrations/AddSomething
 # 생성된 SQL을 읽어 보고
 npm run migration:run
 ```
@@ -75,8 +77,8 @@ npm run migration:run
 | 명령 | 설명 |
 |---|---|
 | `npm run migration:show` | 적용 여부 확인 |
-| `npm run migration:revert:service` / `:auth` | 마지막 마이그레이션 되돌리기 |
-| `npm run db:down` | MySQL 컨테이너 중지 (데이터 유지) |
+| `npm run migration:revert` | 마지막 마이그레이션 되돌리기 |
+| `npm run db:down` | PostgreSQL 컨테이너 중지 (데이터 유지) |
 | `npm run db:reset` | **데이터까지 전부 삭제** 후 새로 시작 → 다시 `migration:run` |
 
-주의: TypeORM은 MySQL `CHECK` 제약을 자동으로 만들지 않습니다. `plants`의 기준값 CHECK는 `InitService` 마이그레이션에 직접 넣어 두었습니다.
+주의: 마이그레이션 생성기는 여러 테이블이 함께 쓰는 enum 타입(예: `service.moisture_status`)을 중복으로 만들 수 있습니다. 생성된 SQL에서 `CREATE TYPE`·`DROP TYPE`이 두 번 나오지 않는지 확인하세요.

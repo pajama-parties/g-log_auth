@@ -1,5 +1,5 @@
 /**
- * 이메일 코드 로그인 e2e (도커 MySQL 필요). 메일은 InMemoryMailTransport로 받아서 코드를 꺼냄.
+ * 이메일 코드 로그인 e2e (도커 PostgreSQL 필요). 메일은 InMemoryMailTransport로 받아서 코드를 꺼냄.
  */
 import { randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
@@ -12,7 +12,6 @@ import type { App } from 'supertest/types.js';
 import { In, type DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module.js';
 import { configureApp } from '../src/app.setup.js';
-import { AUTH_CONNECTION } from '../src/config/database.config.js';
 import { AuthToken } from '../src/database/schema/entities/auth/auth-token.entity.js';
 import { LoginHistory } from '../src/database/schema/entities/auth/login-history.entity.js';
 import { User } from '../src/database/schema/entities/auth/user.entity.js';
@@ -26,8 +25,7 @@ function cookie(res: request.Response, name: string): string | undefined {
 
 describe('이메일 코드 로그인 (e2e)', () => {
   let app: INestApplication<App>;
-  let authDb: DataSource;
-  let serviceDb: DataSource;
+  let db: DataSource;
   const mailbox = new InMemoryMailTransport();
   const tag = randomUUID().slice(0, 8);
   const emails: string[] = [];
@@ -46,8 +44,8 @@ describe('이메일 코드 로그인 (e2e)', () => {
   };
   /** 재요청 대기(60초)를 건너뛰려고 마지막 코드의 발급 시각을 과거로 */
   const ageCode = async (email: string) => {
-    const user = await authDb.getRepository(User).findOneByOrFail({ email });
-    await authDb.getRepository(AuthToken).update({ userId: user.id }, { createdAt: new Date(Date.now() - 120_000) });
+    const user = await db.getRepository(User).findOneByOrFail({ email });
+    await db.getRepository(AuthToken).update({ userId: user.id }, { createdAt: new Date(Date.now() - 120_000) });
   };
 
   beforeAll(async () => {
@@ -61,17 +59,16 @@ describe('이메일 코드 로그인 (e2e)', () => {
     app = moduleRef.createNestApplication();
     configureApp(app);
     await app.init();
-    authDb = app.get<DataSource>(getDataSourceToken(AUTH_CONNECTION));
-    serviceDb = app.get<DataSource>(getDataSourceToken());
+    db = app.get<DataSource>(getDataSourceToken());
   });
 
   afterAll(async () => {
-    const users = await authDb.getRepository(User).find({ where: { email: In(emails) }, withDeleted: true });
+    const users = await db.getRepository(User).find({ where: { email: In(emails) }, withDeleted: true });
     const ids = users.map((u) => u.id);
     if (ids.length > 0) {
-      await serviceDb.getRepository(UserProfile).delete({ userId: In(ids) });
-      await authDb.getRepository(LoginHistory).delete({ userId: In(ids) });
-      await authDb.getRepository(User).delete({ id: In(ids) }); // auth_tokens는 CASCADE
+      await db.getRepository(UserProfile).delete({ userId: In(ids) });
+      await db.getRepository(LoginHistory).delete({ userId: In(ids) });
+      await db.getRepository(User).delete({ id: In(ids) }); // auth_tokens는 CASCADE
     }
     delete process.env.SIGN_IN_RATE_LIMIT;
     await app.close();
@@ -83,9 +80,11 @@ describe('이메일 코드 로그인 (e2e)', () => {
     const email = newEmail();
     await http().post('/api/auth/email/code').send({ email: email.toUpperCase() }).expect(204);
 
-    const created = await authDb.getRepository(User).findOneByOrFail({ email });
+    const created = await db.getRepository(User).findOneByOrFail({ email });
     expect(created.emailVerified).toBe(false);
-    const token = await authDb.getRepository(AuthToken).findOneByOrFail({ userId: created.id });
+    // 프로필은 계정과 같은 트랜잭션에서 만들어짐 (service.user_profiles → auth.users FK)
+    expect(await db.getRepository(UserProfile).findOneByOrFail({ userId: created.id })).toMatchObject({ nickname: "식물 집사" });
+    const token = await db.getRepository(AuthToken).findOneByOrFail({ userId: created.id });
     expect(token.purpose).toBe('EMAIL_VERIFY');
     expect(token.tokenHash).not.toContain(lastCode(email)); // 원문 저장 안 함
 
@@ -95,7 +94,7 @@ describe('이메일 코드 로그인 (e2e)', () => {
     expect(access).toBeDefined();
     await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(200);
 
-    const after = await authDb.getRepository(User).findOneByOrFail({ email });
+    const after = await db.getRepository(User).findOneByOrFail({ email });
     expect(after.emailVerified).toBe(true);
     expect(after.lastLoginAt).not.toBeNull();
 
@@ -109,7 +108,7 @@ describe('이메일 코드 로그인 (e2e)', () => {
     await http().post('/api/auth/email/code').send({ email }).expect(204);
     const res = await http().post('/api/auth/email/verify').send({ email, code: lastCode(email) }).expect(200);
     expect(res.body[0]).toMatchObject({ email, name: '기존 집사' });
-    expect(await authDb.getRepository(User).countBy({ email })).toBe(1);
+    expect(await db.getRepository(User).countBy({ email })).toBe(1);
     // 비밀번호 로그인도 그대로
     await http().post('/api/auth/login').send({ email, password: 'garden1234' }).expect(200);
   });
@@ -146,8 +145,8 @@ describe('이메일 코드 로그인 (e2e)', () => {
   it('만료된 코드는 401', async () => {
     const email = newEmail();
     await http().post('/api/auth/email/code').send({ email }).expect(204);
-    const user = await authDb.getRepository(User).findOneByOrFail({ email });
-    await authDb.getRepository(AuthToken).update({ userId: user.id }, { expiresAt: new Date(Date.now() - 1000) });
+    const user = await db.getRepository(User).findOneByOrFail({ email });
+    await db.getRepository(AuthToken).update({ userId: user.id }, { expiresAt: new Date(Date.now() - 1000) });
     await http().post('/api/auth/email/verify').send({ email, code: lastCode(email) }).expect(401);
   });
 
@@ -160,7 +159,7 @@ describe('이메일 코드 로그인 (e2e)', () => {
   it('없는 이메일로 인증만 시도하면 401 (계정을 만들지 않음)', async () => {
     const email = newEmail();
     await http().post('/api/auth/email/verify').send({ email, code: '123456' }).expect(401);
-    expect(await authDb.getRepository(User).countBy({ email })).toBe(0);
+    expect(await db.getRepository(User).countBy({ email })).toBe(0);
   });
 
   it('메일 발송 실패면 503, 코드는 지워져 바로 다시 요청 가능', async () => {
@@ -175,7 +174,9 @@ describe('이메일 코드 로그인 (e2e)', () => {
     const email = newEmail();
     await http().post('/api/auth/email/code').send({ email }).expect(204);
     const code = lastCode(email);
-    await http().post('/api/auth/signup').send({ email, password: 'garden1234', name: '진짜 주인' }).expect(201);
+    // 코드 요청 때 계정과 함께 만든 프로필(기본 닉네임)이 가입할 때 입력한 닉네임으로 바뀜
+    const signup = await http().post('/api/auth/signup').send({ email, password: 'garden1234', name: '진짜 주인' }).expect(201);
+    expect(signup.body[0]).toMatchObject({ name: '진짜 주인' });
     // 가입하면서 보냈던 코드는 무효
     await http().post('/api/auth/email/verify').send({ email, code }).expect(401);
     // 인증까지 끝난 계정에는 다시 가입 불가
@@ -185,7 +186,7 @@ describe('이메일 코드 로그인 (e2e)', () => {
   it('정지된 계정은 코드가 맞아도 403', async () => {
     const email = newEmail();
     await http().post('/api/auth/email/code').send({ email }).expect(204);
-    await authDb.getRepository(User).update({ email }, { status: 'SUSPENDED' });
+    await db.getRepository(User).update({ email }, { status: 'SUSPENDED' });
     await http().post('/api/auth/email/verify').send({ email, code: lastCode(email) }).expect(403);
   });
 

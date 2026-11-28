@@ -12,7 +12,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }), // backend/.env
-    DatabaseModule, // auth_db + service_db
+    DatabaseModule, // PostgreSQL (auth, service 스키마)
     AuthModule, // 전역 로그인 가드 + /api/auth/*
     RateLimitModule, // AuthModule 다음 (가드 실행 순서)
     // Distributed tracing, auto-correlated logs, request/job metrics, error

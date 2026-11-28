@@ -2,18 +2,17 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { AuthenticationStorage, type RefreshTokenRecord, type RefreshTokenStore } from '@nestjs/authentication';
 import { DataSource, IsNull, LessThan } from 'typeorm';
-import { AUTH_CONNECTION } from '../config/database.config.js';
 import { RefreshTokenFamily } from '../database/schema/entities/auth/refresh-token-family.entity.js';
 import { RefreshToken } from '../database/schema/entities/auth/refresh-token.entity.js';
 
 /**
- * @nestjs/authentication 의 refresh 토큰 저장소를 auth_db 에 둔다.
+ * @nestjs/authentication 의 refresh 토큰 저장소를 auth 스키마에 둔다.
  * (기본값은 메모리라서 서버를 재시작하면 모두 로그아웃되고, 운영 모드에서는 시작 자체가 거부됨)
  */
 @Injectable()
 export class TypeOrmRefreshTokenStore implements RefreshTokenStore {
   constructor(
-    @InjectDataSource(AUTH_CONNECTION) private readonly db: DataSource,
+    @InjectDataSource() private readonly db: DataSource,
     storage: AuthenticationStorage,
   ) {
     storage.registerSource({ refreshTokens: this });
