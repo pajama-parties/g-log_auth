@@ -24,12 +24,10 @@
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d --wait",
     "typeorm": "typeorm",
-    "migration:generate:auth": "nest build && typeorm migration:generate --pretty -d dist/database/data-source.auth.js",
-    "migration:generate:service": "nest build && typeorm migration:generate --pretty -d dist/database/data-source.service.js",
-    "migration:run": "nest build && typeorm migration:run -d dist/database/data-source.auth.js && typeorm migration:run -d dist/database/data-source.service.js",
-    "migration:revert:auth": "nest build && typeorm migration:revert -d dist/database/data-source.auth.js",
-    "migration:revert:service": "nest build && typeorm migration:revert -d dist/database/data-source.service.js",
-    "migration:show": "nest build && typeorm migration:show -d dist/database/data-source.auth.js && typeorm migration:show -d dist/database/data-source.service.js"
+    "migration:generate": "nest build && typeorm migration:generate --pretty -d dist/database/data-source.js",
+    "migration:run": "nest build && typeorm migration:run -d dist/database/data-source.js",
+    "migration:revert": "nest build && typeorm migration:revert -d dist/database/data-source.js",
+    "migration:show": "nest build && typeorm migration:show -d dist/database/data-source.js"
   },
   "dependencies": {
     "@nestjs/authentication": "^0.1.7",
@@ -42,7 +40,7 @@
     "@nestjs/swagger": "^12.1.2",
     "@nestjs/throttler": "^6.8.0",
     "@nestjs/typeorm": "^12.0.3",
-    "mysql2": "^3.24.6",
+    "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "typeorm": "^1.1.3",

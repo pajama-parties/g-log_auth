@@ -1,5 +1,5 @@
 /**
- * 이메일 가입·로그인 e2e (도커 MySQL 필요). 스웨거 문서가 뜨는지도 확인.
+ * 이메일 가입·로그인 e2e (도커 PostgreSQL 필요). 스웨거 문서가 뜨는지도 확인.
  */
 import { randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
@@ -11,7 +11,6 @@ import type { App } from 'supertest/types.js';
 import { In, type DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module.js';
 import { configureApp } from '../src/app.setup.js';
-import { AUTH_CONNECTION } from '../src/config/database.config.js';
 import { LoginHistory } from '../src/database/schema/entities/auth/login-history.entity.js';
 import { User } from '../src/database/schema/entities/auth/user.entity.js';
 import { UserProfile } from '../src/database/schema/entities/service/user-profile.entity.js';
@@ -24,8 +23,7 @@ function cookie(res: request.Response, name: string): string | undefined {
 
 describe('이메일 가입·로그인 (e2e)', () => {
   let app: INestApplication<App>;
-  let authDb: DataSource;
-  let serviceDb: DataSource;
+  let db: DataSource;
   const tag = randomUUID().slice(0, 8);
   const email = `Test.${tag}@Example.com`; // 저장은 소문자로
   const password = 'garden1234';
@@ -40,17 +38,16 @@ describe('이메일 가입·로그인 (e2e)', () => {
     app = moduleRef.createNestApplication();
     configureApp(app);
     await app.init();
-    authDb = app.get<DataSource>(getDataSourceToken(AUTH_CONNECTION));
-    serviceDb = app.get<DataSource>(getDataSourceToken());
+    db = app.get<DataSource>(getDataSourceToken());
   });
 
   afterAll(async () => {
-    const users = await authDb.getRepository(User).find({ where: { email: email.toLowerCase() }, withDeleted: true });
+    const users = await db.getRepository(User).find({ where: { email: email.toLowerCase() }, withDeleted: true });
     const ids = users.map((u) => u.id);
     if (ids.length > 0) {
-      await serviceDb.getRepository(UserProfile).delete({ userId: In(ids) });
-      await authDb.getRepository(LoginHistory).delete({ userId: In(ids) });
-      await authDb.getRepository(User).delete({ id: In(ids) });
+      await db.getRepository(UserProfile).delete({ userId: In(ids) });
+      await db.getRepository(LoginHistory).delete({ userId: In(ids) });
+      await db.getRepository(User).delete({ id: In(ids) });
     }
     delete process.env.SIGN_IN_RATE_LIMIT;
     await app.close();
@@ -77,7 +74,7 @@ describe('이메일 가입·로그인 (e2e)', () => {
     expect(access).toBeDefined();
     await http().get('/api/me').set('Cookie', `access_token=${access}`).expect(200);
 
-    const stored = await authDb
+    const stored = await db
       .getRepository(User)
       .createQueryBuilder('u')
       .addSelect('u.passwordHash')
@@ -100,17 +97,17 @@ describe('이메일 가입·로그인 (e2e)', () => {
     const unknown = await http().post('/api/auth/login').send({ email: `nobody.${tag}@example.com`, password }).expect(401);
     expect(wrong.body.message).toBe(unknown.body.message);
 
-    const failures = await authDb.getRepository(LoginHistory).count({ where: { method: 'EMAIL', success: false } });
+    const failures = await db.getRepository(LoginHistory).count({ where: { method: 'EMAIL', success: false } });
     expect(failures).toBeGreaterThanOrEqual(2);
   });
 
   it('정지된 계정: 비밀번호가 맞을 때만 403 (틀리면 그냥 401)', async () => {
-    await authDb.getRepository(User).update({ email: email.toLowerCase() }, { status: 'SUSPENDED' });
+    await db.getRepository(User).update({ email: email.toLowerCase() }, { status: 'SUSPENDED' });
     try {
       await http().post('/api/auth/login').send({ email, password: 'wrong-pass1' }).expect(401);
       await http().post('/api/auth/login').send({ email, password }).expect(403);
     } finally {
-      await authDb.getRepository(User).update({ email: email.toLowerCase() }, { status: 'ACTIVE' });
+      await db.getRepository(User).update({ email: email.toLowerCase() }, { status: 'ACTIVE' });
     }
   });
 

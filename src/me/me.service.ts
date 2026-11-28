@@ -1,8 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { TokenService } from '@nestjs/authentication';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, IsNull, MoreThan, Not } from 'typeorm';
-import { AUTH_CONNECTION } from '../config/database.config.js';
 import { OAuthAccount } from '../database/schema/entities/auth/oauth-account.entity.js';
 import { User } from '../database/schema/entities/auth/user.entity.js';
 import { Device } from '../database/schema/entities/service/device.entity.js';
@@ -28,11 +27,8 @@ function koreanMonthDay(date: Date): string {
 
 @Injectable()
 export class MeService {
-  private readonly logger = new Logger(MeService.name);
-
   constructor(
-    @InjectDataSource(AUTH_CONNECTION) private readonly authDb: DataSource,
-    @InjectDataSource() private readonly serviceDb: DataSource,
+    @InjectDataSource() private readonly db: DataSource,
     private readonly tokens: TokenService,
   ) {}
 
@@ -45,53 +41,45 @@ export class MeService {
       changes.kakaoConsentAt = input.kakaoConsent ? new Date() : null;
     }
     if (Object.keys(changes).length > 0) {
-      await this.serviceDb.getRepository(UserProfile).update({ userId: user.id }, changes);
+      await this.db.getRepository(UserProfile).update({ userId: user.id }, changes);
     }
     return this.getMe(user);
   }
 
   /**
-   * 탈퇴.
-   * auth_db: 계정을 WITHDRAWN + 소프트 삭제, 이메일·비밀번호 비움, 카카오 연결 삭제(다시 로그인하면 새 계정), 모든 refresh 토큰 폐기.
-   * service_db: 프로필 익명화(글·댓글은 '탈퇴한 사용자'로 남음), 화분·알림 소프트 삭제, 센서는 연결 해제(다른 사람이 다시 등록 가능).
-   * 두 DB를 한 트랜잭션으로 묶을 수 없어서 계정부터 막고(로그인 차단), 서비스 데이터를 정리함.
+   * 탈퇴. 계정과 서비스 데이터를 트랜잭션 하나로 정리함 (중간에 실패하면 전부 되돌림).
+   * auth: 계정을 WITHDRAWN + 소프트 삭제, 이메일·비밀번호 비움, 카카오 연결 삭제(다시 로그인하면 새 계정).
+   * service: 프로필 익명화(글·댓글은 '탈퇴한 사용자'로 남음), 화분·알림 소프트 삭제, 센서는 연결 해제(다른 사람이 다시 등록 가능).
+   * refresh 토큰 폐기는 커밋한 뒤에 함 (TokenService가 자기 연결로 저장소를 씀).
    */
   async withdraw(user: User): Promise<void> {
-    await this.authDb.transaction(async (em) => {
+    await this.db.transaction(async (em) => {
       await em.update(User, { id: user.id }, { status: 'WITHDRAWN', email: null, passwordHash: null });
       await em.softDelete(User, { id: user.id });
       await em.delete(OAuthAccount, { userId: user.id });
+      await em.update(UserProfile, { userId: user.id }, {
+        nickname: WITHDRAWN_NICKNAME,
+        kakaoConsent: false,
+        kakaoConsentAt: null,
+        notifyDry: false,
+        notifyWet: false,
+        notifyOffline: false,
+        notifyAdvice: false,
+      });
+      await em.softDelete(Plant, { userId: user.id });
+      await em.softDelete(Notification, { userId: user.id });
+      await em.update(Device, { userId: user.id }, { userId: null, plantId: null });
     });
     await this.tokens.revokeAll(String(user.id));
-
-    try {
-      await this.serviceDb.transaction(async (em) => {
-        await em.update(UserProfile, { userId: user.id }, {
-          nickname: WITHDRAWN_NICKNAME,
-          kakaoConsent: false,
-          kakaoConsentAt: null,
-          notifyDry: false,
-          notifyWet: false,
-          notifyOffline: false,
-          notifyAdvice: false,
-        });
-        await em.softDelete(Plant, { userId: user.id });
-        await em.softDelete(Notification, { userId: user.id });
-        await em.update(Device, { userId: user.id }, { userId: null, plantId: null });
-      });
-    } catch (err) {
-      // 계정은 이미 막혔으므로 사용자에게는 성공. 남은 데이터는 로그를 보고 정리
-      this.logger.error(`탈퇴 후 서비스 데이터 정리 실패 user_id=${user.id}`, err instanceof Error ? err.stack : String(err));
-    }
   }
 
   async getMe(user: User): Promise<MeResponse> {
     const [profile, kakao, potCount, sensorTotal, sensorOnline] = await Promise.all([
-      this.serviceDb.getRepository(UserProfile).findOne({ where: { userId: user.id } }),
-      this.authDb.getRepository(OAuthAccount).findOne({ where: { userId: user.id, provider: 'KAKAO' } }),
-      this.serviceDb.getRepository(Plant).count({ where: { userId: user.id } }),
-      this.serviceDb.getRepository(Device).count({ where: { userId: user.id, plantId: Not(IsNull()) } }),
-      this.serviceDb.getRepository(Device).count({
+      this.db.getRepository(UserProfile).findOne({ where: { userId: user.id } }),
+      this.db.getRepository(OAuthAccount).findOne({ where: { userId: user.id, provider: 'KAKAO' } }),
+      this.db.getRepository(Plant).count({ where: { userId: user.id } }),
+      this.db.getRepository(Device).count({ where: { userId: user.id, plantId: Not(IsNull()) } }),
+      this.db.getRepository(Device).count({
         where: { userId: user.id, plantId: Not(IsNull()), lastSeenAt: MoreThan(new Date(Date.now() - OFFLINE_AFTER_MS)) },
       }),
     ]);

@@ -1,13 +1,9 @@
 import { join } from 'node:path';
 import type { DataSourceOptions } from 'typeorm';
-import { AUTH_ENTITIES } from '../database/schema/entities/auth/index.js';
-import { SERVICE_ENTITIES } from '../database/schema/entities/service/index.js';
+import { ENTITIES } from '../database/schema/entities/index.js';
 
 /** Nest(ConfigService)와 TypeORM CLI(process.env) 양쪽에서 같은 설정을 쓰기 위한 읽기 함수 */
 export type EnvGetter = (key: string) => string | undefined;
-
-/** 인증 DB 연결 이름. 서비스 DB는 기본 연결('default') */
-export const AUTH_CONNECTION = 'auth';
 
 function required(get: EnvGetter, key: string): string {
   const value = get(key);
@@ -17,41 +13,25 @@ function required(get: EnvGetter, key: string): string {
   return value;
 }
 
-function baseOptions(get: EnvGetter) {
+/**
+ * PostgreSQL DB 하나에 스키마 두 개 (auth: 계정·토큰, service: 화분·커뮤니티 등).
+ * 스키마 사이에도 실제 FK가 있고, 한 연결이라 두 스키마의 변경을 트랜잭션 하나로 묶을 수 있음.
+ */
+export function dbOptions(get: EnvGetter): DataSourceOptions {
   return {
-    type: 'mysql' as const,
+    type: 'postgres',
     host: required(get, 'DB_HOST'),
     port: Number(required(get, 'DB_PORT')),
     username: required(get, 'DB_USER'),
     password: required(get, 'DB_PASSWORD'),
-    charset: 'utf8mb4_0900_ai_ci',
-    timezone: 'Z', // DATETIME은 모두 UTC로 저장
-    supportBigNumbers: true,
-    bigNumberStrings: false, // BIGINT id를 number로 받음 (AUTO_INCREMENT는 2^53을 넘지 않음)
+    database: required(get, 'DB_NAME'),
+    // BIGINT id를 number로 받음 (기본은 문자열. IDENTITY 값은 2^53을 넘지 않음)
+    parseInt8: true,
+    entities: ENTITIES,
+    migrations: [join(import.meta.dirname, '..', 'database', 'schema', 'migrations', '*.js')],
+    // 마이그레이션 기록은 public 스키마에 둠 (auth·service 스키마는 첫 마이그레이션이 만듦)
+    migrationsTableName: 'typeorm_migrations',
     synchronize: false, // 테이블은 마이그레이션으로만 바꿈
     logging: get('DB_LOGGING') === 'true',
-  };
-}
-
-const migrationsDir = (db: 'auth' | 'service') =>
-  join(import.meta.dirname, '..', 'database', 'schema', 'migrations', db, '*.js');
-
-export function authDbOptions(get: EnvGetter): DataSourceOptions {
-  return {
-    ...baseOptions(get),
-    database: required(get, 'AUTH_DB_NAME'),
-    entities: AUTH_ENTITIES,
-    migrations: [migrationsDir('auth')],
-    migrationsTableName: 'typeorm_migrations',
-  };
-}
-
-export function serviceDbOptions(get: EnvGetter): DataSourceOptions {
-  return {
-    ...baseOptions(get),
-    database: required(get, 'SERVICE_DB_NAME'),
-    entities: SERVICE_ENTITIES,
-    migrations: [migrationsDir('service')],
-    migrationsTableName: 'typeorm_migrations',
   };
 }
