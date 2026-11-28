@@ -17,6 +17,25 @@ npm run start:dev           # http://localhost:3000
 - 도커 PostgreSQL은 **5433** 포트를 씁니다 (PC에 설치된 PostgreSQL이 5432를 쓰는 경우와 겹치지 않게).
 - 접속 정보: `127.0.0.1:5433`, DB `.env`의 `DB_NAME`, 계정 `DB_USER` / `DB_PASSWORD` (DBeaver·pgAdmin 등으로 확인 가능)
 
+## 도커로 전체 스택 실행
+
+서버를 직접 실행하지 않고 PostgreSQL, 마이그레이션, auth 서버(3000번 포트), 서비스 API(3001번 포트)를 모두 도커로 띄울 수 있습니다. 서비스 API는 옆 폴더의 `../g-log_web_API`를 빌드하므로, 두 레포를 같은 폴더 아래에 받아 두고 두 레포 모두 Entity 서브모듈(`src/database/schema`, 엔티티와 마이그레이션)을 받아 둬야 합니다. 아래 명령은 `g-log_auth` 폴더에서 실행합니다.
+
+```bash
+git submodule update --init                    # g-log_auth, g-log_web_API 양쪽에서
+cp .env.example .env                           # .env가 없을 때만 (값 채우기)
+npm run stack:up                               # 이미지 빌드 → 마이그레이션 → 서버 2개 실행
+                                               # 확인: http://localhost:3000/api/docs, http://localhost:3001/api/docs
+npm run stack:logs                             # 서버 로그
+npm run stack:down                             # 전체 중지 (데이터 유지)
+```
+
+- 두 서버는 이 레포의 `.env` 하나를 함께 씁니다. 그래서 `JWT_ACCESS_SECRET`과 DB 접속 정보가 항상 같습니다.
+- `.env`의 `DB_HOST`·`DB_PORT`는 PC에서 DB에 접속할 때 쓰는 값입니다. 컨테이너 안에서는 `postgres:5432`로 접속하도록 `docker-compose.yml`에서 바꿔 넣습니다.
+- `stack:up`을 실행할 때마다 `docker-compose.yml`의 `migrate` 서비스가 `npm run migration:run`과 같은 마이그레이션을 실행하고, 성공해야 두 서버가 시작합니다. 실패하면 `docker compose logs migrate`로 원인을 확인합니다.
+- 커뮤니티 사진은 도커 볼륨 `glog-uploads`에 저장되고, `stack:down` 후에도 남습니다. DB와 사진까지 모두 지우려면 `docker compose --profile app down -v`를 실행합니다.
+- 코드를 고친 뒤에는 `npm run stack:up`을 다시 실행하면 이미지를 새로 빌드합니다.
+
 ## DB 구조
 
 PostgreSQL DB 하나(`DB_NAME`)를 스키마 두 개로 나눠 쓰고, 연결은 하나입니다. 서비스에서는 `@InjectDataSource() db: DataSource`로 받아 두 스키마의 엔티티를 함께 다룹니다.

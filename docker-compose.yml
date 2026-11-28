@@ -1,5 +1,9 @@
-# 로컬 개발용 PostgreSQL 17 — `npm run db:up` 으로 실행
-# DB 하나(DB_NAME)에 auth·service 스키마를 둠. 스키마와 테이블은 마이그레이션(npm run migration:run)이 만듦
+# 로컬 개발용 도커 구성
+# - DB만:      npm run db:up     → PostgreSQL 17 (서버는 npm run start:dev 로 직접 실행)
+# - 전체 스택: npm run stack:up  → PostgreSQL + 마이그레이션 + auth(3000) + 서비스 API(3001)
+#   서비스 API는 옆 폴더 ../g-log_web_API 를 빌드하므로 두 레포를 같은 폴더 아래에 받아 둬야 함
+#   두 레포 모두 Entity 서브모듈을 받아 둬야 함: git submodule update --init
+# DB 하나(DB_NAME)에 auth·service 스키마를 둠. 스키마와 테이블은 마이그레이션이 만듦
 services:
   postgres:
     image: postgres:17
@@ -21,5 +25,65 @@ services:
       timeout: 5s
       retries: 20
 
+  # 아직 실행하지 않은 마이그레이션을 실행하고 종료함. auth·api는 이 작업이 성공한 뒤에 시작함
+  migrate:
+    profiles: [app]
+    build: .
+    image: glog-auth
+    env_file: .env
+    environment: &db-in-network
+      # 컨테이너끼리는 서비스 이름과 내부 포트로 접속 (.env의 DB_HOST·DB_PORT는 PC에서 접속할 때 쓰는 값)
+      DB_HOST: postgres
+      DB_PORT: '5432'
+    command: ['node', 'node_modules/typeorm/cli.js', 'migration:run', '-d', 'dist/database/data-source.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  auth:
+    profiles: [app]
+    image: glog-auth
+    container_name: glog-auth
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      <<: *db-in-network
+      PORT: '3000'
+    ports:
+      - '3000:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/docs-json').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    profiles: [app]
+    build: ../g-log_web_API
+    image: glog-api
+    container_name: glog-api
+    restart: unless-stopped
+    # auth와 같은 .env를 씀 → JWT_ACCESS_SECRET·DB 접속 정보가 항상 같음 (서비스 API가 쓰지 않는 값은 무시됨)
+    env_file: .env
+    environment:
+      <<: *db-in-network
+      PORT: '3001'
+    ports:
+      - '3001:3001'
+    volumes:
+      - glog-uploads:/app/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3001/api/docs-json').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
 volumes:
   glog-postgres-data:
+  glog-uploads: # 커뮤니티 사진
