@@ -191,7 +191,7 @@ describe('이메일 코드 로그인 (e2e)', () => {
   });
 
   it('스웨거 문서에 이메일 코드 로그인 API가 있음', async () => {
-    const res = await http().get('/api/docs-json').expect(200);
+    const res = await http().get('/api/auth/docs-json').expect(200);
     expect(res.body.paths['/api/auth/email/code'].post.responses).toHaveProperty('204');
     expect(res.body.paths['/api/auth/email/verify'].post.responses).toHaveProperty('200');
     expect(JSON.stringify(res.body.paths['/api/auth/email/verify'].post.requestBody)).toMatch(/code/);

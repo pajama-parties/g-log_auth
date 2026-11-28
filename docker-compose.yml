@@ -16,7 +16,7 @@ services:
       TZ: UTC
       PGTZ: UTC
     ports:
-      - '${DB_PORT}:5432'
+      - '127.0.0.1:${DB_PORT}:5432' # 이 PC(서버)에서만 접속 가능
     volumes:
       - glog-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -49,13 +49,15 @@ services:
     environment:
       <<: *db-in-network
       PORT: '3000'
+      # 요청은 nginx → 도커 내부 주소(사설 IP)로 들어오므로 그 주소가 붙인 X-Forwarded-For를 믿음
+      TRUST_PROXY: loopback, uniquelocal
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000' # 외부 공개는 nginx(443)가 담당
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/docs-json').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/auth/docs-json').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -72,7 +74,7 @@ services:
       <<: *db-in-network
       PORT: '3001'
     ports:
-      - '3001:3001'
+      - '127.0.0.1:3001:3001'
     volumes:
       - glog-uploads:/app/uploads
     depends_on:

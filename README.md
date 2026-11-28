@@ -25,7 +25,7 @@ npm run start:dev           # http://localhost:3000
 git submodule update --init                    # g-log_auth, g-log_web_API 양쪽에서
 cp .env.example .env                           # .env가 없을 때만 (값 채우기)
 npm run stack:up                               # 이미지 빌드 → 마이그레이션 → 서버 2개 실행
-                                               # 확인: http://localhost:3000/api/docs, http://localhost:3001/api/docs
+                                               # 확인: http://localhost:3000/api/auth/docs, http://localhost:3001/api/docs
 npm run stack:logs                             # 서버 로그
 npm run stack:down                             # 전체 중지 (데이터 유지)
 ```
@@ -52,7 +52,7 @@ PostgreSQL DB 하나(`DB_NAME`)를 스키마 두 개로 나눠 쓰고, 연결은
 
 ## API 문서 (스웨거)
 
-서버를 켜고 **http://localhost:3000/api/docs** — 코드에서 자동 생성되므로 항상 실제 동작과 같습니다. (JSON: `/api/docs-json`)
+서버를 켜고 **http://localhost:3000/api/auth/docs** — 코드에서 자동 생성되므로 항상 실제 동작과 같습니다. (JSON: `/api/auth/docs-json`)
 입력 검사는 Zod 스키마(`*.schemas.ts`)로 하고, 같은 스키마가 문서에 그대로 나옵니다.
 
 ## 인증 (카카오·이메일 로그인 + JWT)

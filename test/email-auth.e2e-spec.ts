@@ -123,8 +123,8 @@ describe('이메일 가입·로그인 (e2e)', () => {
     }
   });
 
-  it('스웨거 문서: /api/docs-json 에 인증·계정 API가 있음', async () => {
-    const res = await http().get('/api/docs-json').expect(200);
+  it('스웨거 문서: /api/auth/docs-json 에 인증·계정 API가 있음', async () => {
+    const res = await http().get('/api/auth/docs-json').expect(200);
     const paths = Object.keys(res.body.paths as object);
     expect(paths).toEqual(
       expect.arrayContaining(['/api/auth/signup', '/api/auth/login', '/api/auth/kakao', '/api/auth/refresh', '/api/auth/logout', '/api/me']),
